@@ -92,11 +92,27 @@ const presences = [
   { name: '/grant para asignar roles', type: ActivityType.Listening },
   { name: `${NODE_ENV === 'production' ? 'online' : 'dev mode'}`, type: ActivityType.Watching },
 ];
+// Presencia rotativa (v14: setPresence NO es Promise)
+const presences = [
+  { name: '/grant para asignar roles', type: 2 }, // ActivityType.Listening
+  { name: 'dev mode', type: 3 },                 // ActivityType.Watching
+];
+
 function rotatePresence(i = 0) {
   const p = presences[i % presences.length];
-  client.user?.setPresence({ activities: [{ name: p.name, type: p.type }], status: 'online' }).catch(() => {});
+  try {
+    if (client.user) {
+      client.user.setPresence({
+        activities: [{ name: p.name, type: p.type }],
+        status: 'online',
+      });
+    }
+  } catch (e) {
+    console.warn('No se pudo setear presencia:', e);
+  }
   setTimeout(() => rotatePresence(i + 1), 60_000);
 }
+
 
 // ============ Utilidades de permisos/cooldowns ============
 function hasAllPermissions(member, perms = []) {

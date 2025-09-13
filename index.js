@@ -1,187 +1,229 @@
-// index.js — MVP Zidong Bot (discord.js v14, ESM)
+// index.js (versión extendida con utilidades)
+// ESM
 import 'dotenv/config';
 import {
-  Client, GatewayIntentBits, REST, Routes,
-  SlashCommandBuilder, ChannelType, PermissionFlagsBits
+  Client,
+  Collection,
+  GatewayIntentBits,
+  Events,
+  ActivityType,
+  PermissionsBitField,
 } from 'discord.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-// -------- Comandos --------
-const commands = [
-  new SlashCommandBuilder()
-    .setName('setup')
-    .setDescription('Crea roles base y estructura mínima del servidor')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('project')
-    .setDescription('Gestiona proyectos')
-    .addSubcommand(sc =>
-      sc.setName('create')
-        .setDescription('Crea categoría y canales estándar de un proyecto (en árbol bajo 03_Proyectos)')
-        .addStringOption(o => o.setName('name').setDescription('Clave del proyecto (ej: alpha)').setRequired(true))
-        .addStringOption(o => o.setName('visibility')
-          .setDescription('public | private')
-          .addChoices({ name: 'public', value: 'public' }, { name: 'private', value: 'private' })
-          .setRequired(true)
-        )
-    ),
-
-  new SlashCommandBuilder()
-    .setName('project_text')
-    .setDescription('Crea un canal de texto dentro de la categoría de un proyecto')
-    .addStringOption(o => o.setName('name').setDescription('Clave del proyecto').setRequired(true))
-    .addStringOption(o => o.setName('channel').setDescription('Nombre del canal').setRequired(true)),
-].map(c => c.toJSON());
-
-// -------- Helpers --------
-const BASE_ROLES = ['Zidong – Exec', 'PM', 'Dev', 'Data/AI', 'QA', 'Invitado'];
-const catName = (k) => `└─ PROY · ${k}`; // estilo árbol
-const stdChannels = (k) => ([
-  { name: `${k}-general`, type: ChannelType.GuildText },
-  { name: `${k}-dev`,     type: ChannelType.GuildText },
-  { name: `${k}-data`,    type: ChannelType.GuildText },
-  { name: `${k}-qa`,      type: ChannelType.GuildText },
-  { name: `${k}-docs`,    type: ChannelType.GuildText },
-  { name: `${k}-meet`,    type: ChannelType.GuildVoice },
-]);
-
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, process.env.DISCORD_GUILD_ID),
-    { body: commands }
-  );
-  console.log('✅ Slash commands registrados');
+// ============ Config & Validaciones de entorno ============
+const REQUIRED_ENVS = ['DISCORD_TOKEN'];
+for (const key of REQUIRED_ENVS) {
+  if (!process.env[key]) {
+    console.error(`❌ Falta variable de entorno: ${key}`);
+    process.exit(1);
+  }
 }
 
-// -------- Bot ready --------
-client.once('ready', async () => {
-  console.log(`🤖 Logueado como ${client.user.tag}`);
-  await registerCommands();
+const OWNER_ID = process.env.OWNER_ID ?? null; // opcional (para comandos owner-only)
+const NODE_ENV = process.env.NODE_ENV ?? 'development';
+
+// ============ Cliente ============
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers, // necesario para roles
+    // NOTA: no pedimos MessageContent porque usamos slash commands
+  ],
 });
 
-// -------- Router --------
-client.on('interactionCreate', async (inter) => {
-  if (!inter.isChatInputCommand()) return;
+// Colecciones & estructuras
+client.commands = new Collection();         // /comandos
+client.cooldowns = new Collection();        // cooldowns por comando (Map<commandName, Map<userId, timestamp>>)
 
-  // /setup
-  if (inter.commandName === 'setup') {
-    await inter.deferReply({ ephemeral: true });
-    const g = inter.guild;
+// ============ Logger pequeño ============
+const log = {
+  info: (...args) => console.log('ℹ️', ...args),
+  ok:   (...args) => console.log('✅', ...args),
+  warn: (...args) => console.warn('⚠️', ...args),
+  err:  (...args) => console.error('❌', ...args),
+};
 
-    // Roles base
-    for (const r of BASE_ROLES) {
-      if (!g.roles.cache.find(rr => rr.name === r)) await g.roles.create({ name: r });
-    }
+// ============ Carga de comandos ============
+async function loadCommands() {
+  const commandsPath = path.join(process.cwd(), 'commands');
 
-    // Categorías contenedoras
-    const ensureCat = async (name) => {
-      let c = g.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === name);
-      if (!c) c = await g.channels.create({ name, type: ChannelType.GuildCategory });
-      return c;
-    };
-    const admin = await ensureCat('01_Admin');
-    const general = await ensureCat('02_General');
-    const proyectos = await ensureCat('03_Proyectos');
-    const reuniones = await ensureCat('04_Salas de Reunión');
-
-    // Canales clave
-    const ensureText = async (parent, name, publicView = true) => {
-      let ch = g.channels.cache.find(c => c.parentId === parent.id && c.name === name);
-      if (!ch) {
-        ch = await g.channels.create({
-          name, type: ChannelType.GuildText, parent: parent.id,
-          permissionOverwrites: publicView ? [] : [{ id: g.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }]
-        });
-      }
-      return ch;
-    };
-    await ensureText(admin, 'anuncios', false);
-    await ensureText(admin, 'audit-log', false);
-    await ensureText(general, 'general', true);
-    await ensureText(general, 'it-helpdesk', true);
-
-    // 5 salas de reunión (voice)
-    for (let i = 1; i <= 5; i++) {
-      const name = `Sala Reunión ${i}`;
-      let v = g.channels.cache.find(c => c.parentId === reuniones.id && c.name === name);
-      if (!v) await g.channels.create({ name, type: ChannelType.GuildVoice, parent: reuniones.id });
-    }
-
-    await inter.editReply('✅ Setup listo: roles, categorías y 5 salas creadas.');
+  if (!fs.existsSync(commandsPath)) {
+    log.warn('Carpeta /commands no encontrada. Crea /commands y agrega tus comandos.');
     return;
   }
 
-  // /project create (con “árbol” bajo 03_Proyectos)
-  if (inter.commandName === 'project' && inter.options.getSubcommand() === 'create') {
-    await inter.deferReply({ ephemeral: true });
-    const g = inter.guild;
-    const key = inter.options.getString('name', true).toLowerCase();
-    const visibility = inter.options.getString('visibility', true); // public | private
-
-    // Contenedor visual de proyectos
-    const parentProjects = g.channels.cache.find(
-      c => c.type === ChannelType.GuildCategory && c.name === '03_Proyectos'
-    );
-
-    const displayName = catName(key);
-    let category = g.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === displayName);
-
-    if (!category) {
-      const overwrites = visibility === 'private'
-        ? [{ id: g.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }]
-        : [];
-
-      category = await g.channels.create({
-        name: displayName,
-        type: ChannelType.GuildCategory,
-        permissionOverwrites: overwrites
-      });
-
-      // Ponerla justo debajo de 03_Proyectos (simula árbol)
-      if (parentProjects) {
-        await category.setPosition(parentProjects.position + 1);
-      }
+  // Permite subcarpetas (ej: /commands/admin/grant.js)
+  const files = [];
+  function walk(dir) {
+    const items = fs.readdirSync(dir, { withFileTypes: true });
+    for (const it of items) {
+      const full = path.join(dir, it.name);
+      if (it.isDirectory()) walk(full);
+      else if (it.isFile() && full.endsWith('.js')) files.push(full);
     }
+  }
+  walk(commandsPath);
 
-    // Canales estándar del proyecto
-    for (const cfg of stdChannels(key)) {
-      const exists = g.channels.cache.find(c => c.parentId === category.id && c.name === cfg.name);
-      if (!exists) {
-        await g.channels.create({
-          name: cfg.name,
-          type: cfg.type,
-          parent: category.id,
-          permissionOverwrites: (visibility === 'private')
-            ? [{ id: g.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }]
-            : []
-        });
+  for (const filePath of files) {
+    try {
+      const mod = await import(pathToFileURL(filePath).href);
+      const cmd = mod.default ?? mod;
+      if (cmd?.data && typeof cmd.execute === 'function') {
+        client.commands.set(cmd.data.name, cmd);
+        log.info(`Comando cargado: /${cmd.data.name}`);
+      } else {
+        log.warn(`Archivo inválido (sin {data, execute}): ${filePath}`);
       }
+    } catch (e) {
+      log.err(`Error importando ${filePath}:`, e);
     }
+  }
 
-    await inter.editReply(`✅ Proyecto **${key}** creado (${visibility}) bajo **03_Proyectos**.`);
+  if (!client.commands.size) {
+    log.warn('No se cargaron comandos. ¿Olvidaste exportar default?');
+  }
+}
+
+// ============ Presencia rotativa (opcional) ============
+const presences = [
+  { name: '/grant para asignar roles', type: ActivityType.Listening },
+  { name: `${NODE_ENV === 'production' ? 'online' : 'dev mode'}`, type: ActivityType.Watching },
+];
+function rotatePresence(i = 0) {
+  const p = presences[i % presences.length];
+  client.user?.setPresence({ activities: [{ name: p.name, type: p.type }], status: 'online' }).catch(() => {});
+  setTimeout(() => rotatePresence(i + 1), 60_000);
+}
+
+// ============ Utilidades de permisos/cooldowns ============
+function hasAllPermissions(member, perms = []) {
+  if (!perms?.length) return true;
+  return member.permissions.has(new PermissionsBitField(perms));
+}
+
+function ensureCooldown(interaction, command) {
+  const seconds = command.cooldown ?? 0; // define cooldown (en segundos) opcional en cada comando
+  if (!seconds) return false;
+
+  const name = command.data.name;
+  if (!client.cooldowns.has(name)) {
+    client.cooldowns.set(name, new Collection());
+  }
+  const now = Date.now();
+  const timestamps = client.cooldowns.get(name);
+  const cooldownAmount = seconds * 1000;
+
+  if (timestamps.has(interaction.user.id)) {
+    const expirationTime = timestamps.get(interaction.user.id) + cooldownAmount;
+    if (now < expirationTime) {
+      const remaining = Math.ceil((expirationTime - now) / 1000);
+      interaction.reply({
+        content: `⏳ Esperá **${remaining}s** para volver a usar \`/${name}\`.`,
+        ephemeral: true,
+      }).catch(() => {});
+      return true;
+    }
+  }
+
+  timestamps.set(interaction.user.id, now);
+  setTimeout(() => timestamps.delete(interaction.user.id), cooldownAmount);
+  return false;
+}
+
+// ============ Eventos ============
+client.once(Events.ClientReady, (c) => {
+  log.ok(`Bot conectado como ${c.user.tag}`);
+  rotatePresence();
+});
+
+client.on(Events.GuildCreate, (guild) => {
+  log.info(`Añadido a guild: ${guild.name} (${guild.id})`);
+});
+
+client.on(Events.GuildDelete, (guild) => {
+  log.info(`Removido de guild: ${guild?.name ?? 'desconocido'} (${guild?.id ?? 'sin id'})`);
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const command = client.commands.get(interaction.commandName);
+  if (!command) {
+    log.warn(`Comando no encontrado: ${interaction.commandName}`);
     return;
   }
 
-  // /project_text
-  if (inter.commandName === 'project_text') {
-    await inter.deferReply({ ephemeral: true });
-    const g = inter.guild;
-    const key = inter.options.getString('name', true).toLowerCase();
-    const channelName = inter.options.getString('channel', true);
+  // Owner-only (opcional, si el comando define { ownerOnly: true })
+  if (command.ownerOnly && OWNER_ID && interaction.user.id !== OWNER_ID) {
+    return interaction.reply({ content: '🚫 Este comando es solo para el owner.', ephemeral: true }).catch(() => {});
+  }
 
-    const category = g.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === catName(key));
-    if (!category) return inter.editReply(`❌ No existe la categoría **${catName(key)}**. Ejecutá /project create.`);
+  // Cooldown por comando (opcional: command.cooldown = segundos)
+  if (ensureCooldown(interaction, command)) return;
 
-    const exists = g.channels.cache.find(c => c.parentId === category.id && c.name === channelName);
-    if (exists) return inter.editReply('ℹ️ Ese canal ya existe.');
+  // Permisos requeridos del BOT (opcional: command.requiredBotPerms = [PermissionFlagsBits.ManageRoles, ...])
+  if (command.requiredBotPerms?.length) {
+    const me = interaction.guild?.members?.me;
+    if (!me || !hasAllPermissions(me, command.requiredBotPerms)) {
+      return interaction.reply({
+        content: '❌ No tengo los permisos necesarios para ejecutar este comando.',
+        ephemeral: true,
+      }).catch(() => {});
+    }
+  }
 
-    await g.channels.create({ name: channelName, type: ChannelType.GuildText, parent: category.id });
-    await inter.editReply(`🆕 Canal **#${channelName}** creado en **${catName(key)}**.`);
+  // Permisos requeridos del USUARIO (opcional: command.requiredUserPerms = [PermissionFlagsBits.ManageRoles, ...])
+  if (command.requiredUserPerms?.length) {
+    const invoker = await interaction.guild.members.fetch(interaction.user.id);
+    if (!hasAllPermissions(invoker, command.requiredUserPerms)) {
+      return interaction.reply({
+        content: '🚫 No tenés permisos suficientes para usar este comando.',
+        ephemeral: true,
+      }).catch(() => {});
+    }
+  }
+
+  try {
+    // Sugerencia: para comandos que pueden tardar (IO con APIs), defer reply
+    // if (!interaction.deferred && !interaction.replied) await interaction.deferReply({ ephemeral: true });
+    await command.execute(interaction, client);
+  } catch (error) {
+    log.err('Error ejecutando comando:', error);
+    const payload = { content: '❌ Ocurrió un error al ejecutar el comando.', ephemeral: true };
+    if (interaction.deferred || interaction.replied) {
+      interaction.followUp(payload).catch(() => {});
+    } else {
+      interaction.reply(payload).catch(() => {});
+    }
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// ============ Anti-crash básico ============
+process.on('unhandledRejection', (reason) => {
+  log.err('unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  log.err('uncaughtException:', err);
+});
+process.on('SIGINT', () => {
+  log.info('Saliendo…');
+  client.destroy();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  log.info('Saliendo…');
+  client.destroy();
+  process.exit(0);
+});
+
+// ============ Bootstrap ============
+await loadCommands();
+
+client.login(process.env.DISCORD_TOKEN).catch((e) => {
+  log.err('Error al loguear el bot:', e);
+  process.exit(1);
+});
 

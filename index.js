@@ -19,7 +19,7 @@ const commands = [
     .setDescription('Gestiona proyectos')
     .addSubcommand(sc =>
       sc.setName('create')
-        .setDescription('Crea categoría y canales estándar de un proyecto')
+        .setDescription('Crea categoría y canales estándar de un proyecto (en árbol bajo 03_Proyectos)')
         .addStringOption(o => o.setName('name').setDescription('Clave del proyecto (ej: alpha)').setRequired(true))
         .addStringOption(o => o.setName('visibility')
           .setDescription('public | private')
@@ -37,7 +37,7 @@ const commands = [
 
 // -------- Helpers --------
 const BASE_ROLES = ['Zidong – Exec', 'PM', 'Dev', 'Data/AI', 'QA', 'Invitado'];
-const catName = (k) => `PROY – ${k}`;
+const catName = (k) => `└─ PROY · ${k}`; // estilo árbol
 const stdChannels = (k) => ([
   { name: `${k}-general`, type: ChannelType.GuildText },
   { name: `${k}-dev`,     type: ChannelType.GuildText },
@@ -71,10 +71,12 @@ client.on('interactionCreate', async (inter) => {
     await inter.deferReply({ ephemeral: true });
     const g = inter.guild;
 
+    // Roles base
     for (const r of BASE_ROLES) {
       if (!g.roles.cache.find(rr => rr.name === r)) await g.roles.create({ name: r });
     }
 
+    // Categorías contenedoras
     const ensureCat = async (name) => {
       let c = g.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === name);
       if (!c) c = await g.channels.create({ name, type: ChannelType.GuildCategory });
@@ -85,6 +87,7 @@ client.on('interactionCreate', async (inter) => {
     const proyectos = await ensureCat('03_Proyectos');
     const reuniones = await ensureCat('04_Salas de Reunión');
 
+    // Canales clave
     const ensureText = async (parent, name, publicView = true) => {
       let ch = g.channels.cache.find(c => c.parentId === parent.id && c.name === name);
       if (!ch) {
@@ -100,6 +103,7 @@ client.on('interactionCreate', async (inter) => {
     await ensureText(general, 'general', true);
     await ensureText(general, 'it-helpdesk', true);
 
+    // 5 salas de reunión (voice)
     for (let i = 1; i <= 5; i++) {
       const name = `Sala Reunión ${i}`;
       let v = g.channels.cache.find(c => c.parentId === reuniones.id && c.name === name);
@@ -110,26 +114,46 @@ client.on('interactionCreate', async (inter) => {
     return;
   }
 
-  // /project create
+  // /project create (con “árbol” bajo 03_Proyectos)
   if (inter.commandName === 'project' && inter.options.getSubcommand() === 'create') {
     await inter.deferReply({ ephemeral: true });
     const g = inter.guild;
     const key = inter.options.getString('name', true).toLowerCase();
     const visibility = inter.options.getString('visibility', true); // public | private
 
-    let category = g.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === catName(key));
+    // Contenedor visual de proyectos
+    const parentProjects = g.channels.cache.find(
+      c => c.type === ChannelType.GuildCategory && c.name === '03_Proyectos'
+    );
+
+    const displayName = catName(key);
+    let category = g.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === displayName);
+
     if (!category) {
       const overwrites = visibility === 'private'
         ? [{ id: g.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }]
         : [];
-      category = await g.channels.create({ name: catName(key), type: ChannelType.GuildCategory, permissionOverwrites: overwrites });
+
+      category = await g.channels.create({
+        name: displayName,
+        type: ChannelType.GuildCategory,
+        permissionOverwrites: overwrites
+      });
+
+      // Ponerla justo debajo de 03_Proyectos (simula árbol)
+      if (parentProjects) {
+        await category.setPosition(parentProjects.position + 1);
+      }
     }
 
+    // Canales estándar del proyecto
     for (const cfg of stdChannels(key)) {
       const exists = g.channels.cache.find(c => c.parentId === category.id && c.name === cfg.name);
       if (!exists) {
         await g.channels.create({
-          name: cfg.name, type: cfg.type, parent: category.id,
+          name: cfg.name,
+          type: cfg.type,
+          parent: category.id,
           permissionOverwrites: (visibility === 'private')
             ? [{ id: g.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }]
             : []
@@ -137,7 +161,7 @@ client.on('interactionCreate', async (inter) => {
       }
     }
 
-    await inter.editReply(`✅ Proyecto **${key}** creado (${visibility}).`);
+    await inter.editReply(`✅ Proyecto **${key}** creado (${visibility}) bajo **03_Proyectos**.`);
     return;
   }
 
@@ -160,3 +184,4 @@ client.on('interactionCreate', async (inter) => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+

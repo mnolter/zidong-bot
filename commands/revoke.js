@@ -12,8 +12,7 @@ export default {
     .addRoleOption(option =>
       option.setName('rol')
         .setDescription('Rol a quitar')
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+        .setRequired(true)),
 
   async execute(interaction) {
     const usuario = interaction.options.getUser('usuario', true);
